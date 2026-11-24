@@ -71,3 +71,19 @@ API 文档：http://localhost:8080/docs 。`GET /api/health` 检查 PostgreSQL�
 默认仅绑定 `127.0.0.1:8080`，数据库不发布宿主机端口。对外部署时设置强管理员和数据库密码，关闭演示数据，在 HTTPS 反向代理后设置 `COOKIE_SECURE=true`。如需直接发布应用端口，可配置 `BIND_ADDRESS=0.0.0.0`。环境变量数据库密码出现在连接 URL 中，特殊字符应使用 URL 百分号编码（或直接为应用提供编码后的 `DATABASE_URL`）。
 
 应用默认不信任代理头。反向代理应保留 Host；HTTPS 代理部署时应配置 uvicorn 仅信任代理 IP（`--proxy-headers --forwarded-allow-ips=<代理IP>`），使 Origin 校验能使用真实协议。当前版本适用于单工作空间用户资料管理；暂不包含多租户、个人登录及细粒度 RBAC。
+
+## GitHub Actions 推送到腾讯云镜像仓库
+
+`.github/workflows/tencent.yml` 在 `main` 分支推送或手动触发时执行：`make build` → 启动应用和真实 PostgreSQL → `make test` → 推送镜像。使用 GitHub Ubuntu runner 构建 `linux/amd64` 镜像，同时发布完整提交 SHA 和 `latest` 两个标签。测试失败不会发布镜像。
+
+在仓库 **Settings → Secrets and variables → Actions**（或 `production` Environment）配置：
+
+| 类型 | 名称 | 内容 |
+| --- | --- | --- |
+| Variable | `TKE_IMAGE_URL` | 完整镜像仓库地址，例如 `ccr.ccs.tencentyun.com/你的命名空间/orbit-user-management`，不带协议和标签 |
+| Secret | `TENCENT_CLOUD_ACCOUNT_ID` | 腾讯云控制台提供的镜像仓库登录用户名 |
+| Secret | `TKE_REGISTRY_PASSWORD` | 有推送权限的镜像仓库密码或 Token |
+
+这两个 Secret 沿用原工作流的名称；用户名应填写控制台登录命令里的实际值。使用 TCR 企业版时，`TKE_IMAGE_URL` 改为对应实例的域名及仓库路径。提前创建命名空间和镜像仓库，并确保仓库网络规则允许 GitHub runner 访问。
+
+工作流保留 `production` Environment；如果该环境设置了审批规则，发布前会等待其审批。此流程只构建、测试和推送应用镜像，不需要腾讯云 API Secret ID/Key、TKE 集群或 Kustomize 文件。PostgreSQL 数据和后台登录凭据不会写入镜像，运行镜像时仍需通过环境变量连接数据库和配置管理员。

@@ -1,79 +1,103 @@
-# This workflow will build a docker container, publish and deploy it to Tencent Kubernetes Engine (TKE) when there is a push to the "main" branch.
-#
-# To configure this workflow:
-#
-# 1. Ensure that your repository contains the necessary configuration for your Tencent Kubernetes Engine cluster,
-#    including deployment.yml, kustomization.yml, service.yml, etc.
-#
-# 2. Set up secrets in your workspace:
-#    - TENCENT_CLOUD_SECRET_ID with Tencent Cloud secret id
-#    - TENCENT_CLOUD_SECRET_KEY with Tencent Cloud secret key
-#    - TENCENT_CLOUD_ACCOUNT_ID with Tencent Cloud account id
-#    - TKE_REGISTRY_PASSWORD with TKE registry password
-#
-# 3. Change the values for the TKE_IMAGE_URL, TKE_REGION, TKE_CLUSTER_ID and DEPLOYMENT_NAME environment variables (below).
+# GitHub configuration (repository or production environment):
+# Variables:
+#   TKE_IMAGE_URL: full image repository, without protocol or tag,
+#     e.g. ccr.ccs.tencentyun.com/<namespace>/orbit-user-management
+# Secrets (names retained from the original Tencent template):
+#   TENCENT_CLOUD_ACCOUNT_ID: registry login username shown by Tencent Cloud
+#   TKE_REGISTRY_PASSWORD: registry login password/token with push permission
+# The target namespace/repository must already exist and allow runner access.
 
-name: Tencent Kubernetes Engine
+name: Tencent Container Registry
 
 on:
   push:
-    branches: [ "main" ]
-
-# Environment variables available to all jobs and steps in this workflow
-env:
-  TKE_IMAGE_URL: ccr.ccs.tencentyun.com/demo/mywebapp
-  TKE_REGION: ap-guangzhou
-  TKE_CLUSTER_ID: cls-mywebapp
-  DEPLOYMENT_NAME: tke-test
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# Serialize publishing so two runs do not update the latest tag concurrently.
+concurrency:
+  group: tencent-registry-main
+  cancel-in-progress: false
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+
 jobs:
-  setup-build-publish-deploy:
-    name: Setup, Build, Publish, and Deploy
+  build-test-publish:
+    name: Build, Test, and Publish
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: production
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Validate registry configuration
+        id: registry
+        env:
+          IMAGE_NAME: ${{ vars.TKE_IMAGE_URL }}
+          REGISTRY_USERNAME: ${{ secrets.TENCENT_CLOUD_ACCOUNT_ID }}
+          REGISTRY_PASSWORD: ${{ secrets.TKE_REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$IMAGE_NAME" ]]; then
+            echo "::error::Set the TKE_IMAGE_URL Actions variable to your Tencent image repository."
+            exit 1
+          fi
+          if [[ ! "$IMAGE_NAME" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._-]+(/[a-z0-9._-]+)+$ ]]; then
+            echo "::error::TKE_IMAGE_URL must be registry/namespace/image, without https:// or an image tag."
+            exit 1
+          fi
+          if [[ -z "$REGISTRY_USERNAME" || -z "$REGISTRY_PASSWORD" ]]; then
+            echo "::error::Set TENCENT_CLOUD_ACCOUNT_ID and TKE_REGISTRY_PASSWORD Actions secrets."
+            exit 1
+          fi
+          printf 'host=%s\n' "${IMAGE_NAME%%/*}" >> "$GITHUB_OUTPUT"
+          printf 'IMAGE_NAME=%s\n' "$IMAGE_NAME" >> "$GITHUB_ENV"
 
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-    # Build
-    - name: Build Docker image
-      run: |
-        docker build -t ${TKE_IMAGE_URL}:${GITHUB_SHA} .
+      - name: Build application image
+        run: make build
 
-    - name: Login TKE Registry
-      run: |
-        docker login -u ${{ secrets.TENCENT_CLOUD_ACCOUNT_ID }} -p '${{ secrets.TKE_REGISTRY_PASSWORD }}' ${TKE_IMAGE_URL}
+      - name: Start application and PostgreSQL
+        run: docker compose up -d --no-build --wait --wait-timeout 120
 
-    # Push the Docker image to TKE Registry
-    - name: Publish
-      run: |
-        docker push ${TKE_IMAGE_URL}:${GITHUB_SHA}
+      - name: Run API integration tests
+        run: make test
 
-    - name: Set up Kustomize
-      run: |
-        curl -o kustomize --location https://github.com/kubernetes-sigs/kustomize/releases/download/v3.1.0/kustomize_3.1.0_linux_amd64
-        chmod u+x ./kustomize
+      - name: Show container logs on failure
+        if: failure() && steps.checkout.outcome == 'success'
+        run: docker compose logs --no-color --tail=100
 
-    - name: Set up ~/.kube/config for connecting TKE cluster
-      uses: TencentCloud/tke-cluster-credential-action@v1
-      with:
-        secret_id: ${{ secrets.TENCENT_CLOUD_SECRET_ID }}
-        secret_key: ${{ secrets.TENCENT_CLOUD_SECRET_KEY }}
-        tke_region: ${{ env.TKE_REGION }}
-        cluster_id: ${{ env.TKE_CLUSTER_ID }}
+      - name: Stop test containers
+        if: always() && steps.checkout.outcome == 'success'
+        run: docker compose down --volumes --remove-orphans
 
-    - name: Switch to TKE context
-      run: |
-        kubectl config use-context ${TKE_CLUSTER_ID}-context-default
+      - name: Login to Tencent registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.TENCENT_CLOUD_ACCOUNT_ID }}
+          password: ${{ secrets.TKE_REGISTRY_PASSWORD }}
 
-    # Deploy the Docker image to the TKE cluster
-    - name: Deploy
-      run: |
-        ./kustomize edit set image ${TKE_IMAGE_URL}:${GITHUB_SHA}
-        ./kustomize build . | kubectl apply -f -
-        kubectl rollout status deployment/${DEPLOYMENT_NAME}
-        kubectl get services -o wide
+      - name: Publish image
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE_NAME:$IMAGE_TAG"
+          docker tag "$IMAGE_NAME:$IMAGE_TAG" "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:latest"
+          {
+            printf '### Tencent image published\n\n'
+            printf -- '- Commit image: `%s:%s`\n' "$IMAGE_NAME" "$IMAGE_TAG"
+            printf -- '- Latest image: `%s:latest`\n' "$IMAGE_NAME"
+            printf -- '- Platform: `linux/amd64`\n'
+          } >> "$GITHUB_STEP_SUMMARY"
