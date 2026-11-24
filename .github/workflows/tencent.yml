@@ -44,16 +44,23 @@ jobs:
           REGISTRY_PASSWORD: ${{ secrets.TKE_REGISTRY_PASSWORD }}
         run: |
           set -euo pipefail
+          invalid=0
           if [[ -z "$IMAGE_NAME" ]]; then
             echo "::error::Set the TKE_IMAGE_URL Actions variable to your Tencent image repository."
-            exit 1
-          fi
-          if [[ ! "$IMAGE_NAME" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._-]+(/[a-z0-9._-]+)+$ ]]; then
+            invalid=1
+          elif [[ ! "$IMAGE_NAME" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._-]+(/[a-z0-9._-]+)+$ ]]; then
             echo "::error::TKE_IMAGE_URL must be registry/namespace/image, without https:// or an image tag."
-            exit 1
+            invalid=1
           fi
-          if [[ -z "$REGISTRY_USERNAME" || -z "$REGISTRY_PASSWORD" ]]; then
-            echo "::error::Set TENCENT_CLOUD_ACCOUNT_ID and TKE_REGISTRY_PASSWORD Actions secrets."
+          if [[ -z "$REGISTRY_USERNAME" ]]; then
+            echo "::error::Set the TENCENT_CLOUD_ACCOUNT_ID Actions secret to the registry login username."
+            invalid=1
+          fi
+          if [[ -z "$REGISTRY_PASSWORD" ]]; then
+            echo "::error::Set the TKE_REGISTRY_PASSWORD Actions secret to the registry password/token."
+            invalid=1
+          fi
+          if (( invalid )); then
             exit 1
           fi
           printf 'host=%s\n' "${IMAGE_NAME%%/*}" >> "$GITHUB_OUTPUT"

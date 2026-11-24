@@ -87,3 +87,5 @@ API 文档：http://localhost:8080/docs 。`GET /api/health` 检查 PostgreSQL�
 这两个 Secret 沿用原工作流的名称；用户名应填写控制台登录命令里的实际值。使用 TCR 企业版时，`TKE_IMAGE_URL` 改为对应实例的域名及仓库路径。提前创建命名空间和镜像仓库，并确保仓库网络规则允许 GitHub runner 访问。
 
 工作流保留 `production` Environment；如果该环境设置了审批规则，发布前会等待其审批。此流程只构建、测试和推送应用镜像，不需要腾讯云 API Secret ID/Key、TKE 集群或 Kustomize 文件。PostgreSQL 数据和后台登录凭据不会写入镜像，运行镜像时仍需通过环境变量连接数据库和配置管理员。
+
+如果旧运行日志显示 `docker login -u -p ''`，说明旧模板没有读取到用户名和密码。确认上述两个值建在 **Secrets** 下，名称完全一致；镜像地址则建在 **Variables** 下。更新工作流后，从 Actions 中选择新的 Tencent Container Registry 工作流并使用 **Run workflow → main**，或查看新提交触发的运行；重新运行旧记录仍会使用旧提交的工作流。
